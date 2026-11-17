@@ -2,41 +2,18 @@
   "id": "./index.html",
   "name": "Álbum de Recordações — Scrapbook Digital",
   "short_name": "Recordações",
-  "description": "Ateliê de scrapbook digital: monte álbuns com fotos, textos manuscritos, notas, adesivos e desenhos. Salve trabalhos, exporte backup .json e gere PDF em alta qualidade — funciona offline.",
+  "description": "Scrapbook digital: fotos, textos manuscritos, notas, adesivos e desenhos em álbuns com PDF em alta qualidade.",
   "lang": "pt-BR",
   "dir": "ltr",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
-  "display_override": ["standalone", "minimal-ui"],
-  "launch_handler": { "client_mode": ["navigate-existing", "auto"] },
   "orientation": "any",
   "background_color": "#2b1f16",
   "theme_color": "#2b1f16",
   "categories": ["photo", "productivity", "lifestyle"],
-  "prefer_related_applications": false,
   "icons": [
-    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
-    { "src": "icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
-  ],
-  "shortcuts": [
-    {
-      "name": "Novo álbum",
-      "short_name": "Novo",
-      "description": "Criar um álbum em branco",
-      "url": "./index.html?acao=novo"
-    },
-    {
-      "name": "Meus trabalhos salvos",
-      "short_name": "Trabalhos",
-      "description": "Abrir a biblioteca de álbuns",
-      "url": "./index.html?acao=trabalhos"
-    },
-    {
-      "name": "Criar PDF em alta qualidade",
-      "short_name": "PDF",
-      "description": "Exportar o álbum atual como PDF",
-      "url": "./index.html?acao=pdf"
-    }
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
   ]
 }
