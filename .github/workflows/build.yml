@@ -1,0 +1,292 @@
+name: Compilar APK — Álbum de Recordações
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    name: Build Android (Capacitor 7 · SDK 35)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Baixar código do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Configurar Java JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Instalar Capacitor, plugins nativos e renderizador SVG
+        run: |
+          npm init -y > /dev/null
+          npm pkg set name="album-recordacoes" version="2.0.0" private=true --json
+          npm install --no-audit --no-fund \
+            @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 \
+            @capacitor/app@^7 @capacitor/filesystem@^7 @capacitor/share@^7 \
+            @capacitor/status-bar@^7 @capacitor/splash-screen@^7 \
+            @capacitor/assets@^3 @resvg/resvg-js@^2
+
+      - name: Preparar www, fontes offline, ícones, splash e ponte nativa
+        run: |
+          cat > prepare.mjs <<'PREPARE_EOF'
+          import { Resvg } from '@resvg/resvg-js';
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const root = process.cwd();
+          const www = path.join(root, 'www');
+          const assetsDir = path.join(root, 'assets');
+          fs.mkdirSync(www, { recursive: true });
+          fs.mkdirSync(assetsDir, { recursive: true });
+          const log = (...a) => console.log('[prepare]', ...a);
+          const warn = (...a) => console.warn('[prepare] aviso:', ...a);
+
+          /* 1) Localiza o HTML do app (aceita index.html ou o nome antigo) */
+          let htmlSrc = 'index.html';
+          if (!fs.existsSync(htmlSrc)) {
+            const cand = fs.readdirSync(root).filter(f => f.endsWith('.html'));
+            if (!cand.length) {
+              console.error('::error::Nenhum .html do app encontrado na raiz do repositório (esperado: index.html).');
+              process.exit(1);
+            }
+            htmlSrc = cand[0];
+            log('index.html não encontrado — usando', htmlSrc);
+          }
+          let html = fs.readFileSync(htmlSrc, 'utf8');
+
+          /* 2) Copia os arquivos web do pacote PWA */
+          for (const f of ['manifest.json', 'sw.js', 'icon.svg', 'icon-maskable.svg']) {
+            if (fs.existsSync(f)) fs.copyFileSync(f, path.join(www, f));
+            else warn(f, 'ausente — seguindo sem ele');
+          }
+          for (const f of fs.readdirSync(root)) {
+            if (/\.png$/i.test(f)) fs.copyFileSync(f, path.join(www, f));
+          }
+
+          /* 3) jsPDF local → PDF funciona offline dentro do APK */
+          const JSPDF_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+          try {
+            const r = await fetch(JSPDF_URL, { signal: AbortSignal.timeout(30000) });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const js = await r.text();
+            if (js.length < 50000 || !js.includes('jsPDF')) throw new Error('conteúdo inesperado');
+            fs.mkdirSync(path.join(www, 'vendor'), { recursive: true });
+            fs.writeFileSync(path.join(www, 'vendor', 'jspdf.umd.min.js'), js);
+            if (html.includes(JSPDF_URL)) {
+              html = html.replace(JSPDF_URL, 'vendor/jspdf.umd.min.js');
+              log('jsPDF embutido localmente');
+            }
+          } catch (e) { warn('jsPDF local falhou (' + e.message + ') — CDN mantido'); }
+
+          /* 4) Fontes manuscritas locais → identidade visual offline */
+          try {
+            const linkRe = /<link[^>]+href="(https:\/\/fonts\.googleapis\.com\/css2[^"]+)"[^>]*>/;
+            const m = html.match(linkRe);
+            if (m) {
+              const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+              const cssRes = await fetch(m[1].replace(/&amp;/g, '&'), { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30000) });
+              if (!cssRes.ok) throw new Error('css HTTP ' + cssRes.status);
+              let css = await cssRes.text();
+              const urls = [...new Set([...css.matchAll(/url\((https:\/\/fonts\.gstatic\.com\/[^)]+)\)/g)].map(x => x[1]))];
+              if (!urls.length) throw new Error('nenhuma fonte no CSS');
+              fs.mkdirSync(path.join(www, 'fonts'), { recursive: true });
+              let i = 0, ok = 0;
+              for (const u of urls) {
+                try {
+                  const fr = await fetch(u, { signal: AbortSignal.timeout(30000) });
+                  if (!fr.ok) continue;
+                  const buf = Buffer.from(await fr.arrayBuffer());
+                  const ext = u.includes('.woff2') ? 'woff2' : u.includes('.woff') ? 'woff' : 'ttf';
+                  const name = 'f' + String(i++).padStart(2, '0') + '.' + ext;
+                  fs.writeFileSync(path.join(www, 'fonts', name), buf);
+                  css = css.split(u).join(name);
+                  ok++;
+                } catch (_) { }
+              }
+              if (!ok) throw new Error('downloads de fonte falharam');
+              fs.writeFileSync(path.join(www, 'fonts', 'fonts.css'), css);
+              html = html.replace(m[0], '<link rel="stylesheet" href="fonts/fonts.css">');
+              log(ok + ' arquivos de fonte embutidos');
+            }
+          } catch (e) { warn('Fontes locais falharam (' + e.message + ') — Google Fonts via CDN mantido'); }
+
+          /* 5) Ícones adaptativos + splash a partir do icon.svg do app */
+          try {
+            const FALLBACK_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#2b1f16"/><g transform="rotate(-8 256 268)"><rect x="136" y="128" width="240" height="288" rx="14" fill="#f7efe1"/><rect x="156" y="148" width="200" height="190" fill="#e9a13b"/><circle cx="256" cy="216" r="34" fill="#fff3c4"/><rect x="156" y="276" width="200" height="62" fill="#2a9d8f"/></g><path transform="translate(354 356) rotate(12) scale(1.18)" d="M0 26 C-4 14 -40 6 -40 -16 C-40 -36 -18 -42 0 -24 C18 -42 40 -36 40 -16 C40 6 4 14 0 26 Z" fill="#d94f43" stroke="#f7efe1" stroke-width="9" stroke-linejoin="round"/></svg>';
+            const iconSvg = fs.existsSync('icon.svg') ? fs.readFileSync('icon.svg', 'utf8') : FALLBACK_ICON;
+            const maskSvg = fs.existsSync('icon-maskable.svg') ? fs.readFileSync('icon-maskable.svg', 'utf8') : iconSvg;
+            const inner = s => s.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
+            const png = (svg, w) => new Resvg(svg, { fitTo: { mode: 'width', value: w } }).render().asPng();
+
+            fs.writeFileSync(path.join(assetsDir, 'icon-only.png'), png(iconSvg, 1024));
+
+            const BG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3d2d1f"/><stop offset="1" stop-color="#221810"/></linearGradient></defs><rect width="512" height="512" fill="url(#bg)"/></svg>';
+            fs.writeFileSync(path.join(assetsDir, 'icon-background.png'), png(BG, 1024));
+
+            const fgInner = inner(maskSvg).replace(/<rect[^>]*width="512"[^>]*height="512"[^>]*fill="url\(#bg\)"[^>]*\/>\s*/, '');
+            const FG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><svg x="56" y="56" width="400" height="400" viewBox="0 0 512 512">' + fgInner + '</svg></svg>';
+            fs.writeFileSync(path.join(assetsDir, 'icon-foreground.png'), png(FG, 1024));
+
+            const SPLASH = '<svg xmlns="http://www.w3.org/2000/svg" width="2732" height="2732" viewBox="0 0 2732 2732"><svg x="1016" y="1016" width="700" height="700" viewBox="0 0 512 512">' + inner(iconSvg) + '</svg></svg>';
+            const splashPng = png(SPLASH, 2732);
+            fs.writeFileSync(path.join(assetsDir, 'splash.png'), splashPng);
+            fs.writeFileSync(path.join(assetsDir, 'splash-dark.png'), splashPng);
+            log('ícones adaptativos + splash gerados');
+          } catch (e) { warn('Geração de ícones falhou (' + e.message + ') — ícone padrão será usado'); }
+
+          /* 6) Ponte nativa: exportar via Compartilhar/Salvar, botão voltar, status bar */
+          const SHIM = [
+            '<script>',
+            '/* Ponte nativa Capacitor — Álbum de Recordações */',
+            '(function(){',
+            "  'use strict';",
+            '  function boot(){',
+            '    var C=window.Capacitor;',
+            '    if(!C||!C.isNativePlatform||!C.isNativePlatform())return;',
+            '    var P=C.Plugins||{};',
+            "    try{if(P.StatusBar){P.StatusBar.setOverlaysWebView({overlay:false});P.StatusBar.setBackgroundColor({color:'#2b1f16'});P.StatusBar.setStyle({style:'DARK'});}}catch(e){}",
+            '    try{if(P.SplashScreen){setTimeout(function(){P.SplashScreen.hide()},250);}}catch(e){}',
+            "    function hint(msg){var t=document.createElement('div');t.textContent=msg;t.style.cssText='position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#33261d;color:#f6ead8;padding:10px 16px;border-radius:10px;font:700 13px Nunito,system-ui,sans-serif;z-index:9999;box-shadow:0 10px 26px rgba(0,0,0,.5);max-width:88vw;text-align:center';document.body.appendChild(t);setTimeout(function(){t.remove()},2200);}",
+            '    var lastBack=0;',
+            "    try{if(P.App){P.App.addListener('backButton',function(){",
+            "      var open=document.querySelector('#modalRoot.open,#ctxMenu.open,#menuDrop.open,#drawer.open,#panel.open,#drawChip.show,#selBox.show');",
+            '      if(open){var el=document.activeElement||document.body;el.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));return;}',
+            '      var now=Date.now();',
+            '      if(now-lastBack<2000){P.App.exitApp();}',
+            "      else{lastBack=now;hint('Pressione voltar novamente para sair');}",
+            '    });}}catch(e){}',
+            "    function b64(blob){return new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(String(r.result).split(',')[1]);};r.onerror=function(){rej(new Error('leitura'));};r.readAsDataURL(blob);});}",
+            "    function sanitize(n){return String(n||'arquivo').replace(/[\\\\/:*?\"<>|]+/g,'_');}",
+            '    async function nativeExport(href,name){',
+            '      try{',
+            '        var data;',
+            "        if(/^data:/i.test(href)){data=href.substring(href.indexOf(',')+1);}",
+            '        else{var resp=await fetch(href);var blob=await resp.blob();data=await b64(blob);}',
+            "        if(!P.Filesystem||!P.Share)throw new Error('plugins');",
+            "        var out=await P.Filesystem.writeFile({path:'export/'+sanitize(name),data:data,directory:'CACHE',recursive:true});",
+            "        await P.Share.share({title:name,files:[out.uri],dialogTitle:'Salvar ou compartilhar'});",
+            "      }catch(err){hint('Não foi possível exportar agora. Tente novamente.');}",
+            '    }',
+            '    function intercept(a){',
+            '      try{',
+            "        var name=a.getAttribute&&a.getAttribute('download');",
+            "        var href=a.href||'';",
+            '        if(name&&/^(blob:|data:)/i.test(href)){nativeExport(href,name);return true;}',
+            '      }catch(e){}',
+            '      return false;',
+            '    }',
+            '    var oc=HTMLAnchorElement.prototype.click;',
+            '    HTMLAnchorElement.prototype.click=function(){if(intercept(this))return;return oc.apply(this,arguments);};',
+            '    var od=HTMLAnchorElement.prototype.dispatchEvent;',
+            "    HTMLAnchorElement.prototype.dispatchEvent=function(ev){if(ev&&ev.type==='click'&&intercept(this))return true;return od.apply(this,arguments);};",
+            '  }',
+            "  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot);else boot();",
+            '})();',
+            '</' + 'script>'
+          ].join('\n');
+          html = html.includes('</body>') ? html.replace('</body>', SHIM + '\n</body>') : html + SHIM;
+
+          /* 7) Grava o HTML final em www */
+          fs.writeFileSync(path.join(www, 'index.html'), html);
+          log('www pronto:', fs.readdirSync(www).join(', '));
+          PREPARE_EOF
+          node prepare.mjs
+
+      - name: Criar projeto Android (Capacitor) e gerar recursos nativos
+        run: |
+          cat > capacitor.config.json <<'CFG'
+          {
+            "appId": "com.scrapbook.digital",
+            "appName": "Álbum de Recordações",
+            "webDir": "www",
+            "server": { "androidScheme": "https" },
+            "android": {
+              "allowMixedContent": false,
+              "webContentsDebuggingEnabled": true,
+              "adjustMarginsForEdgeToEdge": "auto"
+            },
+            "plugins": {
+              "StatusBar": {
+                "style": "DARK",
+                "backgroundColor": "#2b1f16",
+                "overlaysWebView": false
+              },
+              "SplashScreen": {
+                "launchShowDuration": 1200,
+                "launchAutoHide": true,
+                "launchFadeOutDuration": 300,
+                "backgroundColor": "#2b1f16",
+                "showSpinner": false,
+                "androidScaleType": "CENTER_CROP"
+              }
+            }
+          }
+          CFG
+          npx cap add android
+          npx cap sync android
+          npx capacitor-assets generate --android \
+            --iconBackgroundColor "#2b1f16" --iconBackgroundColorDark "#2b1f16" \
+            --splashBackgroundColor "#2b1f16" --splashBackgroundColorDark "#2b1f16" \
+            || echo "::warning::Geração de ícones nativos falhou — ícone padrão do Capacitor será usado"
+
+      - name: Ajustar SDK (35/35/23), memória e UTF-8 do Gradle
+        run: |
+          sed -i 's/compileSdkVersion = .*/compileSdkVersion = 35/' android/variables.gradle
+          sed -i 's/targetSdkVersion = .*/targetSdkVersion = 35/' android/variables.gradle
+          sed -i 's/minSdkVersion = .*/minSdkVersion = 23/' android/variables.gradle
+          printf '\norg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8\norg.gradle.parallel=true\n' >> android/gradle.properties
+
+      - name: Cache do Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-cap7-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-cap7-
+
+      - name: Compilar APK (debug assinado, instalável)
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Preparar artefatos para download
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/album-recordacoes-debug.apk
+          ls -lh dist
+
+      - name: Publicar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: album-recordacoes-apk
+          path: dist/album-recordacoes-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publicar versão web (PWA pronta com fontes offline)
+        uses: actions/upload-artifact@v4
+        with:
+          name: album-recordacoes-web
+          path: www
+          if-no-files-found: error
+          retention-days: 14
