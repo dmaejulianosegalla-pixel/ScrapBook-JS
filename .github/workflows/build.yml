@@ -33,7 +33,7 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Instalar Capacitor, plugins nativos e renderizador SVG
+      - name: Instalar Capacitor, plugins nativos e gerador de imagens
         run: |
           npm init -y > /dev/null
           npm pkg set name="album-recordacoes" version="2.0.0" private=true --json
@@ -41,12 +41,12 @@ jobs:
             @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 \
             @capacitor/app@^7 @capacitor/filesystem@^7 @capacitor/share@^7 \
             @capacitor/status-bar@^7 @capacitor/splash-screen@^7 \
-            @capacitor/assets@^3 @resvg/resvg-js@^2
+            @capacitor/assets@^3 sharp
 
-      - name: Preparar www, fontes offline, ícones, splash e ponte nativa
+      - name: Preparar www, ícones, splash e ponte nativa
         run: |
           cat > prepare.mjs <<'PREPARE_EOF'
-          import { Resvg } from '@resvg/resvg-js';
+          import sharp from 'sharp';
           import fs from 'node:fs';
           import path from 'node:path';
 
@@ -57,13 +57,14 @@ jobs:
           fs.mkdirSync(assetsDir, { recursive: true });
           const log = (...a) => console.log('[prepare]', ...a);
           const warn = (...a) => console.warn('[prepare] aviso:', ...a);
+          const CLEAR = { r: 0, g: 0, b: 0, alpha: 0 };
 
-          /* 1) Localiza o HTML do app (aceita index.html ou o nome antigo) */
+          /* 1) HTML do app (index.html ou o primeiro .html da raiz) */
           let htmlSrc = 'index.html';
           if (!fs.existsSync(htmlSrc)) {
             const cand = fs.readdirSync(root).filter(f => f.endsWith('.html'));
             if (!cand.length) {
-              console.error('::error::Nenhum .html do app encontrado na raiz do repositório (esperado: index.html).');
+              console.error('::error::Nenhum arquivo .html do app encontrado na raiz (esperado: index.html).');
               process.exit(1);
             }
             htmlSrc = cand[0];
@@ -71,10 +72,9 @@ jobs:
           }
           let html = fs.readFileSync(htmlSrc, 'utf8');
 
-          /* 2) Copia os arquivos web do pacote PWA */
+          /* 2) Copia os arquivos que existirem no repositório */
           for (const f of ['manifest.json', 'sw.js', 'icon.svg', 'icon-maskable.svg']) {
             if (fs.existsSync(f)) fs.copyFileSync(f, path.join(www, f));
-            else warn(f, 'ausente — seguindo sem ele');
           }
           for (const f of fs.readdirSync(root)) {
             if (/\.png$/i.test(f)) fs.copyFileSync(f, path.join(www, f));
@@ -91,14 +91,13 @@ jobs:
             fs.writeFileSync(path.join(www, 'vendor', 'jspdf.umd.min.js'), js);
             if (html.includes(JSPDF_URL)) {
               html = html.replace(JSPDF_URL, 'vendor/jspdf.umd.min.js');
-              log('jsPDF embutido localmente');
+              log('jsPDF embutido (PDF offline)');
             }
-          } catch (e) { warn('jsPDF local falhou (' + e.message + ') — CDN mantido'); }
+          } catch (e) { warn('jsPDF local falhou — CDN mantido:', e.message); }
 
-          /* 4) Fontes manuscritas locais → identidade visual offline */
+          /* 4) Fontes manuscritas locais → visual do app sem internet */
           try {
-            const linkRe = /<link[^>]+href="(https:\/\/fonts\.googleapis\.com\/css2[^"]+)"[^>]*>/;
-            const m = html.match(linkRe);
+            const m = html.match(/<link[^>]+href="(https:\/\/fonts\.googleapis\.com\/css2[^"]+)"[^>]*>/);
             if (m) {
               const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
               const cssRes = await fetch(m[1].replace(/&amp;/g, '&'), { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(30000) });
@@ -112,46 +111,49 @@ jobs:
                 try {
                   const fr = await fetch(u, { signal: AbortSignal.timeout(30000) });
                   if (!fr.ok) continue;
-                  const buf = Buffer.from(await fr.arrayBuffer());
                   const ext = u.includes('.woff2') ? 'woff2' : u.includes('.woff') ? 'woff' : 'ttf';
                   const name = 'f' + String(i++).padStart(2, '0') + '.' + ext;
-                  fs.writeFileSync(path.join(www, 'fonts', name), buf);
+                  fs.writeFileSync(path.join(www, 'fonts', name), Buffer.from(await fr.arrayBuffer()));
                   css = css.split(u).join(name);
                   ok++;
                 } catch (_) { }
               }
-              if (!ok) throw new Error('downloads de fonte falharam');
+              if (!ok) throw new Error('downloads falharam');
               fs.writeFileSync(path.join(www, 'fonts', 'fonts.css'), css);
               html = html.replace(m[0], '<link rel="stylesheet" href="fonts/fonts.css">');
-              log(ok + ' arquivos de fonte embutidos');
+              log(ok + ' fontes embutidas');
             }
-          } catch (e) { warn('Fontes locais falharam (' + e.message + ') — Google Fonts via CDN mantido'); }
+          } catch (e) { warn('Fontes locais falharam — CDN mantido:', e.message); }
 
-          /* 5) Ícones adaptativos + splash a partir do icon.svg do app */
+          /* 5) Ícones adaptativos + splash a partir do PNG do repositório */
           try {
-            const FALLBACK_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#2b1f16"/><g transform="rotate(-8 256 268)"><rect x="136" y="128" width="240" height="288" rx="14" fill="#f7efe1"/><rect x="156" y="148" width="200" height="190" fill="#e9a13b"/><circle cx="256" cy="216" r="34" fill="#fff3c4"/><rect x="156" y="276" width="200" height="62" fill="#2a9d8f"/></g><path transform="translate(354 356) rotate(12) scale(1.18)" d="M0 26 C-4 14 -40 6 -40 -16 C-40 -36 -18 -42 0 -24 C18 -42 40 -36 40 -16 C40 6 4 14 0 26 Z" fill="#d94f43" stroke="#f7efe1" stroke-width="9" stroke-linejoin="round"/></svg>';
-            const iconSvg = fs.existsSync('icon.svg') ? fs.readFileSync('icon.svg', 'utf8') : FALLBACK_ICON;
-            const maskSvg = fs.existsSync('icon-maskable.svg') ? fs.readFileSync('icon-maskable.svg', 'utf8') : iconSvg;
-            const inner = s => s.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
-            const png = (svg, w) => new Resvg(svg, { fitTo: { mode: 'width', value: w } }).render().asPng();
+            const src = ['icon-512.png', 'icon-192.png'].find(f => fs.existsSync(f));
+            let logoBuf;
+            if (src) {
+              logoBuf = await sharp(src).resize(1024, 1024, { fit: 'contain', background: CLEAR }).png().toBuffer();
+              log('ícone base:', src);
+            } else {
+              const FALLBACK = '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#2b1f16"/><g transform="rotate(-8 256 268)"><rect x="136" y="128" width="240" height="288" rx="14" fill="#f7efe1"/><rect x="156" y="148" width="200" height="190" fill="#e9a13b"/><circle cx="256" cy="216" r="34" fill="#fff3c4"/><rect x="156" y="276" width="200" height="62" fill="#2a9d8f"/></g><path transform="translate(354 356) rotate(12) scale(1.18)" d="M0 26 C-4 14 -40 6 -40 -16 C-40 -36 -18 -42 0 -24 C18 -42 40 -36 40 -16 C40 6 4 14 0 26 Z" fill="#d94f43" stroke="#f7efe1" stroke-width="9"/></svg>';
+              logoBuf = await sharp(Buffer.from(FALLBACK)).png().toBuffer();
+              warn('nenhum PNG encontrado — ícone de emergência gerado');
+            }
+            fs.writeFileSync(path.join(assetsDir, 'icon-only.png'), logoBuf);
 
-            fs.writeFileSync(path.join(assetsDir, 'icon-only.png'), png(iconSvg, 1024));
+            const BG = '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3d2d1f"/><stop offset="1" stop-color="#221810"/></linearGradient></defs><rect width="1024" height="1024" fill="url(#g)"/></svg>';
+            await sharp(Buffer.from(BG)).png().toFile(path.join(assetsDir, 'icon-background.png'));
 
-            const BG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3d2d1f"/><stop offset="1" stop-color="#221810"/></linearGradient></defs><rect width="512" height="512" fill="url(#bg)"/></svg>';
-            fs.writeFileSync(path.join(assetsDir, 'icon-background.png'), png(BG, 1024));
+            const fg = await sharp(logoBuf).resize(660, 660, { fit: 'contain', background: CLEAR }).toBuffer();
+            await sharp({ create: { width: 1024, height: 1024, channels: 4, background: CLEAR } })
+              .composite([{ input: fg }]).png().toFile(path.join(assetsDir, 'icon-foreground.png'));
 
-            const fgInner = inner(maskSvg).replace(/<rect[^>]*width="512"[^>]*height="512"[^>]*fill="url\(#bg\)"[^>]*\/>\s*/, '');
-            const FG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><svg x="56" y="56" width="400" height="400" viewBox="0 0 512 512">' + fgInner + '</svg></svg>';
-            fs.writeFileSync(path.join(assetsDir, 'icon-foreground.png'), png(FG, 1024));
-
-            const SPLASH = '<svg xmlns="http://www.w3.org/2000/svg" width="2732" height="2732" viewBox="0 0 2732 2732"><svg x="1016" y="1016" width="700" height="700" viewBox="0 0 512 512">' + inner(iconSvg) + '</svg></svg>';
-            const splashPng = png(SPLASH, 2732);
-            fs.writeFileSync(path.join(assetsDir, 'splash.png'), splashPng);
-            fs.writeFileSync(path.join(assetsDir, 'splash-dark.png'), splashPng);
+            const sp = await sharp(logoBuf).resize(700, 700, { fit: 'contain', background: CLEAR }).toBuffer();
+            await sharp({ create: { width: 2732, height: 2732, channels: 4, background: CLEAR } })
+              .composite([{ input: sp }]).png().toFile(path.join(assetsDir, 'splash.png'));
+            fs.copyFileSync(path.join(assetsDir, 'splash.png'), path.join(assetsDir, 'splash-dark.png'));
             log('ícones adaptativos + splash gerados');
-          } catch (e) { warn('Geração de ícones falhou (' + e.message + ') — ícone padrão será usado'); }
+          } catch (e) { warn('Geração de imagens falhou:', e.message); }
 
-          /* 6) Ponte nativa: exportar via Compartilhar/Salvar, botão voltar, status bar */
+          /* 6) Ponte nativa: salvar/compartilhar PDF-JSON-PNG, botão voltar, status bar */
           const SHIM = [
             '<script>',
             '/* Ponte nativa Capacitor — Álbum de Recordações */',
@@ -203,13 +205,12 @@ jobs:
           ].join('\n');
           html = html.includes('</body>') ? html.replace('</body>', SHIM + '\n</body>') : html + SHIM;
 
-          /* 7) Grava o HTML final em www */
           fs.writeFileSync(path.join(www, 'index.html'), html);
           log('www pronto:', fs.readdirSync(www).join(', '));
           PREPARE_EOF
           node prepare.mjs
 
-      - name: Criar projeto Android (Capacitor) e gerar recursos nativos
+      - name: Criar projeto Android e gerar recursos nativos
         run: |
           cat > capacitor.config.json <<'CFG'
           {
@@ -223,11 +224,7 @@ jobs:
               "adjustMarginsForEdgeToEdge": "auto"
             },
             "plugins": {
-              "StatusBar": {
-                "style": "DARK",
-                "backgroundColor": "#2b1f16",
-                "overlaysWebView": false
-              },
+              "StatusBar": { "style": "DARK", "backgroundColor": "#2b1f16", "overlaysWebView": false },
               "SplashScreen": {
                 "launchShowDuration": 1200,
                 "launchAutoHide": true,
@@ -244,9 +241,9 @@ jobs:
           npx capacitor-assets generate --android \
             --iconBackgroundColor "#2b1f16" --iconBackgroundColorDark "#2b1f16" \
             --splashBackgroundColor "#2b1f16" --splashBackgroundColorDark "#2b1f16" \
-            || echo "::warning::Geração de ícones nativos falhou — ícone padrão do Capacitor será usado"
+            || echo "::warning::Geração de ícones falhou — ícone padrão do Capacitor será usado"
 
-      - name: Ajustar SDK (35/35/23), memória e UTF-8 do Gradle
+      - name: Ajustar SDK (35/35/23), memória e UTF-8
         run: |
           sed -i 's/compileSdkVersion = .*/compileSdkVersion = 35/' android/variables.gradle
           sed -i 's/targetSdkVersion = .*/targetSdkVersion = 35/' android/variables.gradle
@@ -269,24 +266,16 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Preparar artefatos para download
+      - name: Preparar artefato
         run: |
           mkdir -p dist
           cp android/app/build/outputs/apk/debug/app-debug.apk dist/album-recordacoes-debug.apk
           ls -lh dist
 
-      - name: Publicar APK
+      - name: Publicar APK para Download
         uses: actions/upload-artifact@v4
         with:
           name: album-recordacoes-apk
           path: dist/album-recordacoes-debug.apk
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Publicar versão web (PWA pronta com fontes offline)
-        uses: actions/upload-artifact@v4
-        with:
-          name: album-recordacoes-web
-          path: www
           if-no-files-found: error
           retention-days: 14
