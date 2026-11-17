@@ -35,8 +35,13 @@ jobs:
 
       - name: Instalar Capacitor, plugins nativos e gerador de imagens
         run: |
-          npm init -y > /dev/null
-          npm pkg set name="album-recordacoes" version="2.0.0" private=true --json
+          cat > package.json <<'PKG'
+          {
+            "name": "album-recordacoes",
+            "version": "2.0.0",
+            "private": true
+          }
+          PKG
           npm install --no-audit --no-fund \
             @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 \
             @capacitor/app@^7 @capacitor/filesystem@^7 @capacitor/share@^7 \
@@ -68,11 +73,11 @@ jobs:
               process.exit(1);
             }
             htmlSrc = cand[0];
-            log('index.html não encontrado — usando', htmlSrc);
+            log('index.html nao encontrado — usando', htmlSrc);
           }
           let html = fs.readFileSync(htmlSrc, 'utf8');
 
-          /* 2) Copia os arquivos que existirem no repositório */
+          /* 2) Copia os arquivos que existirem no repositorio */
           for (const f of ['manifest.json', 'sw.js', 'icon.svg', 'icon-maskable.svg']) {
             if (fs.existsSync(f)) fs.copyFileSync(f, path.join(www, f));
           }
@@ -86,7 +91,7 @@ jobs:
             const r = await fetch(JSPDF_URL, { signal: AbortSignal.timeout(30000) });
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const js = await r.text();
-            if (js.length < 50000 || !js.includes('jsPDF')) throw new Error('conteúdo inesperado');
+            if (js.length < 50000 || !js.includes('jsPDF')) throw new Error('conteudo inesperado');
             fs.mkdirSync(path.join(www, 'vendor'), { recursive: true });
             fs.writeFileSync(path.join(www, 'vendor', 'jspdf.umd.min.js'), js);
             if (html.includes(JSPDF_URL)) {
@@ -125,17 +130,17 @@ jobs:
             }
           } catch (e) { warn('Fontes locais falharam — CDN mantido:', e.message); }
 
-          /* 5) Ícones adaptativos + splash a partir do PNG do repositório */
+          /* 5) Icones adaptativos + splash a partir do PNG do repositorio */
           try {
             const src = ['icon-512.png', 'icon-192.png'].find(f => fs.existsSync(f));
             let logoBuf;
             if (src) {
               logoBuf = await sharp(src).resize(1024, 1024, { fit: 'contain', background: CLEAR }).png().toBuffer();
-              log('ícone base:', src);
+              log('icone base:', src);
             } else {
               const FALLBACK = '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#2b1f16"/><g transform="rotate(-8 256 268)"><rect x="136" y="128" width="240" height="288" rx="14" fill="#f7efe1"/><rect x="156" y="148" width="200" height="190" fill="#e9a13b"/><circle cx="256" cy="216" r="34" fill="#fff3c4"/><rect x="156" y="276" width="200" height="62" fill="#2a9d8f"/></g><path transform="translate(354 356) rotate(12) scale(1.18)" d="M0 26 C-4 14 -40 6 -40 -16 C-40 -36 -18 -42 0 -24 C18 -42 40 -36 40 -16 C40 6 4 14 0 26 Z" fill="#d94f43" stroke="#f7efe1" stroke-width="9"/></svg>';
               logoBuf = await sharp(Buffer.from(FALLBACK)).png().toBuffer();
-              warn('nenhum PNG encontrado — ícone de emergência gerado');
+              warn('nenhum PNG encontrado — icone de emergencia gerado');
             }
             fs.writeFileSync(path.join(assetsDir, 'icon-only.png'), logoBuf);
 
@@ -144,19 +149,21 @@ jobs:
 
             const fg = await sharp(logoBuf).resize(660, 660, { fit: 'contain', background: CLEAR }).toBuffer();
             await sharp({ create: { width: 1024, height: 1024, channels: 4, background: CLEAR } })
-              .composite([{ input: fg }]).png().toFile(path.join(assetsDir, 'icon-foreground.png'));
+              .composite([{ input: fg, top: 182, left: 182 }])
+              .png().toFile(path.join(assetsDir, 'icon-foreground.png'));
 
             const sp = await sharp(logoBuf).resize(700, 700, { fit: 'contain', background: CLEAR }).toBuffer();
             await sharp({ create: { width: 2732, height: 2732, channels: 4, background: CLEAR } })
-              .composite([{ input: sp }]).png().toFile(path.join(assetsDir, 'splash.png'));
+              .composite([{ input: sp, top: 1016, left: 1016 }])
+              .png().toFile(path.join(assetsDir, 'splash.png'));
             fs.copyFileSync(path.join(assetsDir, 'splash.png'), path.join(assetsDir, 'splash-dark.png'));
-            log('ícones adaptativos + splash gerados');
-          } catch (e) { warn('Geração de imagens falhou:', e.message); }
+            log('icones adaptativos + splash gerados');
+          } catch (e) { warn('Geracao de imagens falhou:', e.message); }
 
-          /* 6) Ponte nativa: salvar/compartilhar PDF-JSON-PNG, botão voltar, status bar */
+          /* 6) Ponte nativa: salvar/compartilhar PDF-JSON-PNG, botao voltar, status bar */
           const SHIM = [
             '<script>',
-            '/* Ponte nativa Capacitor — Álbum de Recordações */',
+            '/* Ponte nativa Capacitor — Album de Recordacoes */',
             '(function(){',
             "  'use strict';",
             '  function boot(){',
@@ -184,7 +191,7 @@ jobs:
             "        if(!P.Filesystem||!P.Share)throw new Error('plugins');",
             "        var out=await P.Filesystem.writeFile({path:'export/'+sanitize(name),data:data,directory:'CACHE',recursive:true});",
             "        await P.Share.share({title:name,files:[out.uri],dialogTitle:'Salvar ou compartilhar'});",
-            "      }catch(err){hint('Não foi possível exportar agora. Tente novamente.');}",
+            "      }catch(err){hint('Nao foi possivel exportar agora. Tente novamente.');}",
             '    }',
             '    function intercept(a){',
             '      try{',
@@ -241,7 +248,7 @@ jobs:
           npx capacitor-assets generate --android \
             --iconBackgroundColor "#2b1f16" --iconBackgroundColorDark "#2b1f16" \
             --splashBackgroundColor "#2b1f16" --splashBackgroundColorDark "#2b1f16" \
-            || echo "::warning::Geração de ícones falhou — ícone padrão do Capacitor será usado"
+            || echo "::warning::Geracao de icones falhou — icone padrao do Capacitor sera usado"
 
       - name: Ajustar SDK (35/35/23), memória e UTF-8
         run: |
